@@ -137,6 +137,11 @@ SDRs can use up. When that happens the log shows
 `libusb: error [submit_iso_transfer] submiturb failed, errno=12`, streams
 stall, and SDR services can crash. The app flags this in red.
 
+If the limit is already 256 MB or more (or 0, meaning no limit), the app shows
+the same error in amber instead. Then raising the limit won't help: the kernel
+briefly couldn't find a large enough block of memory, and the SDR software
+retries. It's harmless unless an SDR also stops streaming.
+
 Check the current limit:
 
 ```
