@@ -263,7 +263,8 @@ impl Watcher {
                 continue;
             }
             shown += 1;
-            let sev = if klog::is_serious(&line) { Severity::Problem } else { Severity::Warning };
+            let serious = klog::is_serious(&line) && !(klog::is_usb_memory_error(&line) && usb_memory_limit_is_high(topo));
+            let sev = if serious { Severity::Problem } else { Severity::Warning };
             let text = if line.is_kernel() {
                 format!("Kernel: {}{}", line.text.trim(), device_hint(&line.text, topo))
             } else {
@@ -340,7 +341,18 @@ impl Watcher {
             Some(mb) => format!("{mb} MB"),
             None => "unknown".to_string(),
         };
-        if self.last_usb_memory_error.is_some_and(|t| now.duration_since(t) < USB_MEMORY_ACTIVE_FOR) {
+        let recent = self.last_usb_memory_error.is_some_and(|t| now.duration_since(t) < USB_MEMORY_ACTIVE_FOR);
+        if recent && usb_memory_limit_is_high(topo) {
+            // Raising the limit won't help; the kernel briefly couldn't find a
+            // large enough block of memory, and libusb programs retry.
+            active.push(Issue {
+                severity: Severity::Warning,
+                text: format!(
+                    "SDR software couldn't get USB buffer memory (libusb errno 12) although the limit is {limit}. Usually brief and harmless unless an SDR also stops streaming"
+                ),
+                target: None,
+            });
+        } else if recent {
             active.push(Issue {
                 severity: Severity::Problem,
                 text: format!(
@@ -515,6 +527,11 @@ impl Watcher {
 
 /// " (bladeRF 2.0)" when a kernel line starts with a device we know, e.g.
 /// "usb 2-8.1: reset SuperSpeed USB device".
+/// Whether usbfs_memory_mb is unlimited or already generous.
+fn usb_memory_limit_is_high(topo: &Topology) -> bool {
+    matches!(topo.usbfs_memory_mb, Some(0)) || topo.usbfs_memory_mb.is_some_and(|mb| mb >= USB_MEMORY_ENOUGH_MB)
+}
+
 /// A plain-English note for program messages whose meaning isn't obvious.
 fn program_hint(line: &klog::LogLine) -> &'static str {
     if klog::is_usb_memory_error(line) {
@@ -640,6 +657,13 @@ mod tests {
         t.usbfs_memory_mb = Some(1000);
         w.on_sample(&t, &Rates::default(), &traffic::Counters::default(), true);
         assert!(w.active.is_empty());
+
+        // With a generous limit the same error is only a warning.
+        w.on_kernel_lines(klog::parse(line).into_iter().collect(), &t);
+        assert_eq!(w.events[0].severity, Severity::Warning);
+        w.on_sample(&t, &Rates::default(), &traffic::Counters::default(), true);
+        assert_eq!(w.active[0].severity, Severity::Warning);
+        assert!(w.active[0].text.contains("although the limit is 1000 MB"), "{}", w.active[0].text);
     }
 
     #[test]
