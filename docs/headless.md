@@ -96,6 +96,9 @@ A preferred Tailscale option keeps the process on localhost and uses an encrypte
 [tailnet-only Serve proxy](https://tailscale.com/kb/1242/tailscale-serve):
 
 ```sh
+# Start the backend with the HTTPS hostname that Serve forwards in Host:
+usb-monitor --headless --allow-host server.your-tailnet.ts.net
+# In another terminal:
 sudo tailscale serve --bg http://127.0.0.1:8080
 ```
 
@@ -168,3 +171,32 @@ checks. Actual usbmon IOCTLs, hardware hotplug, Tailscale routing and journal
 permissions still require verification on the deployment host.
 
 References: [systemd execution settings](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html), [Tailscale Serve command](https://tailscale.com/docs/reference/tailscale-cli/serve).
+
+## Trusted HTTP hosts (DNS rebinding protection)
+
+Every route, including `/api/state` and static files, rejects untrusted or missing
+`Host` headers with HTTP 403. By default, the exact bound IP and actual port are
+trusted; loopback binds also trust `localhost` with that port. IPs are never
+looked up through DNS to decide whether a hostname is trusted. No wildcard
+hostname matching is performed, and forwarded headers do not grant trust.
+
+When using a DNS name, an authenticated reverse proxy, or Tailscale Serve, add
+only the exact authority the proxy forwards to the backend. Repeat the option
+for multiple authorities; ports are significant. For example:
+
+```sh
+usb-monitor --headless --allow-host monitor.example.test
+usb-monitor --headless --allow-host server.your-tailnet.ts.net --allow-host server.your-tailnet.ts.net:443
+```
+
+Use your actual trusted hostname. Enter `HOST[:PORT]`, with no scheme, path,
+userinfo or wildcard. Alternatively configure your reverse proxy to overwrite
+its upstream `Host` with `127.0.0.1:8080`. Protect the whole proxy origin with
+authentication as described above. The allowlist prevents DNS rebinding; it is
+not authentication for clients that already have direct network access.
+
+For an all-interface bind (`0.0.0.0` or `::`), explicitly allow the IPs or names
+clients use, e.g. `--allow-host 192.168.1.25:8080`. The unspecified address does
+not implicitly trust all local interfaces or arbitrary hostnames. Specific LAN
+or Tailscale IP binds automatically trust that bound IP and port. Add the same
+`--allow-host` flags to systemd's `ExecStart` override when using a proxy hostname.

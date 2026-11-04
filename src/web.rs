@@ -11,7 +11,7 @@ use axum::{
     extract::State,
     http::{HeaderValue, StatusCode},
     middleware::{self, Next},
-    response::{Html, Response},
+    response::{Html, IntoResponse, Response},
     routing::get,
 };
 use serde_json::{Value, json};
@@ -22,6 +22,105 @@ use std::{
 };
 
 type Snapshot = Arc<RwLock<Value>>;
+
+/// Exact HTTP authorities, never DNS-resolved: DNS rebinding must not turn an
+/// arbitrary hostname into a trusted loopback origin. Ports are significant.
+#[derive(Clone)]
+struct HostPolicy(Vec<String>);
+
+fn authority(value: &str) -> Result<String, String> {
+    let parsed = value
+        .parse::<axum::http::uri::Authority>()
+        .map_err(|_| format!("invalid allowed host: {value}"))?;
+    let host = parsed.host();
+    let ip = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>();
+    let normalized = if let Ok(ip) = ip {
+        match ip {
+            std::net::IpAddr::V4(ip) => ip.to_string(),
+            std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+        }
+    } else {
+        if host.len() > 253
+            || !host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+            })
+        {
+            return Err(format!("invalid allowed host: {value}"));
+        }
+        host.to_ascii_lowercase()
+    };
+    // Authority's port accessors treat a nonnumeric suffix as absent. Parse
+    // the complete suffix ourselves so malformed Host values cannot alias a
+    // trusted authority without a port.
+    let invalid = || format!("invalid allowed host: {value}");
+    let suffix = value.strip_prefix(host).ok_or_else(invalid)?;
+    let port = if suffix.is_empty() {
+        None
+    } else {
+        let text = suffix.strip_prefix(':').ok_or_else(invalid)?;
+        if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        Some(text.parse::<u16>().map_err(|_| invalid())?)
+    };
+    Ok(match port {
+        Some(port) => format!("{normalized}:{port}"),
+        None => normalized,
+    })
+}
+
+impl HostPolicy {
+    fn new(address: SocketAddr, extra: &[String]) -> Self {
+        let mut hosts = extra.to_vec();
+        if !address.ip().is_unspecified() {
+            hosts.push(address.to_string());
+        }
+        if address.ip().is_loopback() {
+            hosts.push(format!("localhost:{}", address.port()));
+        }
+        Self(hosts)
+    }
+
+    fn accepts(&self, request: &axum::extract::Request) -> bool {
+        let mut values = request.headers().get_all("host").iter();
+        let Some(host) = values
+            .next()
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| authority(v).ok())
+        else {
+            return false;
+        };
+        if values.next().is_some() || !self.0.contains(&host) {
+            return false;
+        }
+        // Do not accept conflicting absolute-form request targets either.
+        request
+            .uri()
+            .authority()
+            .is_none_or(|a| authority(a.as_str()).ok().as_ref() == Some(&host))
+    }
+}
+
+async fn require_host(
+    State(hosts): State<HostPolicy>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    if !hosts.accepts(&request) {
+        return (StatusCode::FORBIDDEN, "Untrusted Host header").into_response();
+    }
+    // Forwarded and X-Forwarded-Host never grant trust.
+    next.run(request).await
+}
 
 fn series(s: Option<&Series>) -> Value {
     json!({"now": s.map_or(0.0, Series::now), "history": s.map(|s| &s.history)})
@@ -85,7 +184,7 @@ async fn headers(request: axum::extract::Request, next: Next) -> Response {
     response
 }
 
-fn router(state: Snapshot) -> Router {
+fn router(state: Snapshot, hosts: HostPolicy) -> Router {
     Router::new()
         .route(
             "/",
@@ -118,6 +217,7 @@ fn router(state: Snapshot) -> Router {
                     .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
             }),
         )
+        .layer(middleware::from_fn_with_state(hosts, require_host))
         .layer(middleware::from_fn(headers))
         .with_state(state)
 }
@@ -127,7 +227,12 @@ pub fn run(
     ids: IdDb,
     demo: bool,
     address: SocketAddr,
+    allowed_hosts: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let allowed_hosts = allowed_hosts
+        .iter()
+        .map(|h| authority(h))
+        .collect::<Result<Vec<_>, _>>()?;
     tokio::runtime::Runtime::new()?.block_on(async move {
         // Bind first: failures must not start monitor threads or create event logs.
         let listener = tokio::net::TcpListener::bind(address).await?;
@@ -151,7 +256,7 @@ pub fn run(
             }
             engine.klog.stop();
         });
-        let result = axum::serve(listener, router(state)).with_graceful_shutdown(shutdown()).await;
+        let result = axum::serve(listener, router(state, HostPolicy::new(actual, &allowed_hosts))).with_graceful_shutdown(shutdown()).await;
         let _ = stop.send(());
         let _ = worker.join();
         result
@@ -181,7 +286,10 @@ mod tests {
 
     #[tokio::test]
     async fn read_only_routes_and_security_headers() {
-        let app = router(Arc::new(RwLock::new(json!({"generation": 7}))));
+        let app = router(
+            Arc::new(RwLock::new(json!({"generation": 7}))),
+            HostPolicy::new("127.0.0.1:8080".parse().unwrap(), &[]),
+        );
         for (path, content_type) in [
             ("/", "text/html"),
             ("/app.js", "text/javascript"),
@@ -190,7 +298,13 @@ mod tests {
         ] {
             let r = app
                 .clone()
-                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("host", "localhost:8080")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
                 .await
                 .unwrap();
             assert_eq!(r.status(), StatusCode::OK);
@@ -221,6 +335,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/state")
+                    .header("host", "localhost:8080")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -231,11 +346,141 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/../../etc/passwd")
+                    .header("host", "localhost:8080")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    }
+    #[tokio::test]
+    async fn rejects_rebinding_and_untrusted_forwarded_hosts_on_every_route() {
+        let app = router(
+            Arc::new(RwLock::new(json!({"serial": "secret"}))),
+            HostPolicy::new(
+                "127.0.0.1:8080".parse().unwrap(),
+                &["monitor.example.test".into()],
+            ),
+        );
+        for path in ["/", "/api/state", "/app.js", "/style.css", "/missing"] {
+            for host in [
+                None,
+                Some("attacker.test:8080"),
+                Some("localhost:9999"),
+                Some("localhost:8080.attacker.test"),
+                Some("localhost:8080@attacker.test"),
+                Some("localhost:8080,attacker.test"),
+            ] {
+                let mut request = Request::builder()
+                    .uri(path)
+                    .header("x-forwarded-host", "localhost:8080")
+                    .header("forwarded", "host=localhost:8080");
+                if let Some(host) = host {
+                    request = request.header("host", host);
+                }
+                let r = app
+                    .clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(r.status(), StatusCode::FORBIDDEN, "{path} {host:?}");
+                let body = to_bytes(r.into_body(), 4096).await.unwrap();
+                assert!(!String::from_utf8_lossy(&body).contains("secret"));
+            }
+        }
+        for host in [
+            "localhost:8080",
+            "LOCALHOST:8080",
+            "127.0.0.1:8080",
+            "monitor.example.test",
+        ] {
+            let r = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/state")
+                        .header("host", host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::OK, "{host}");
+        }
+        for request in [
+            Request::builder()
+                .uri("/api/state")
+                .header("host", "localhost:8080")
+                .header("host", "attacker.test:8080")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("http://attacker.test:8080/api/state")
+                .header("host", "localhost:8080")
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+    }
+
+    #[test]
+    fn exact_host_configuration_handles_ipv6_and_specific_interface_binds() {
+        for bad in [
+            "*",
+            "*.example.test",
+            "https://monitor.example.test",
+            "user@localhost",
+            "localhost/path",
+            "localhost:",
+            "localhost:bad",
+            "localhost:65536",
+            "",
+            "a..b",
+            "a b",
+        ] {
+            assert!(authority(bad).is_err(), "accepted {bad}");
+        }
+        assert_eq!(authority("[::1]:8080").unwrap(), "[::1]:8080");
+        assert_eq!(
+            authority("MONITOR.example.test:443").unwrap(),
+            "monitor.example.test:443"
+        );
+        for (bound, allowed, rejected) in [
+            ("[::1]:8080", "[::1]:8080", "attacker.test:8080"),
+            (
+                "192.168.1.25:8080",
+                "192.168.1.25:8080",
+                "attacker.test:8080",
+            ),
+            (
+                "100.101.102.103:8080",
+                "100.101.102.103:8080",
+                "attacker.test:8080",
+            ),
+            (
+                "0.0.0.0:8080",
+                "monitor.example.test:8080",
+                "192.168.1.25:8080",
+            ),
+        ] {
+            let policy = HostPolicy::new(
+                bound.parse().unwrap(),
+                &["monitor.example.test:8080".into()],
+            );
+            let request = |host| {
+                Request::builder()
+                    .uri("/api/state")
+                    .header("host", host)
+                    .body(Body::empty())
+                    .unwrap()
+            };
+            assert!(policy.accepts(&request(allowed)));
+            assert!(!policy.accepts(&request(rejected)));
+        }
     }
 }

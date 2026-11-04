@@ -24,7 +24,7 @@ fn request(port: u16, path: &str) -> String {
         .unwrap();
     write!(
         stream,
-        "GET {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.0\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"
     )
     .unwrap();
     let mut out = String::new();
@@ -166,6 +166,9 @@ fn invalid_options_and_bind_conflicts_fail() {
         vec!["--headless", "--port", "65536"],
         vec!["--headless", "--bind", "invalid"],
         vec!["--headless", "--dump"],
+        vec!["--allow-host", "monitor.example.test"],
+        vec!["--headless", "--allow-host", "*"],
+        vec!["--headless", "--allow-host", "localhost:bad"],
     ] {
         assert!(
             !Command::new(env!("CARGO_BIN_EXE_usb-monitor"))

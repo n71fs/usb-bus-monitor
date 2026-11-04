@@ -26,6 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bind: std::net::IpAddr = "127.0.0.1".parse()?;
     let mut port: u16 = 8080;
     let mut bind_set = false;
+    let mut allowed_hosts = Vec::<String>::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -33,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--headless" => headless = true,
             "--bind" => { bind = args.next().ok_or("--bind needs an IP address")?.parse()?; bind_set = true; },
             "--port" => { port = args.next().ok_or("--port needs a number")?.parse()?; bind_set = true; },
+            "--allow-host" => { allowed_hosts.push(args.next().ok_or("--allow-host needs HOST[:PORT]")?); bind_set = true; },
             "--install" => return Ok(install::install()?),
             "--uninstall" => return Ok(install::uninstall()?),
             // Made-up traffic, for screenshots on machines without SDRs.
@@ -51,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      --headless       serve the web UI (requires web feature)\n  \
                      --bind IP        explicit listen address (default 127.0.0.1)\n  \
                      --port PORT      listen port (default 8080)\n  \
+                     --allow-host HOST[:PORT]  trust an additional exact web host (repeatable)\n  \
                      --version        print the version number\n  \
                      --sys-root PATH  read a copy of /sys from PATH (for testing)"
                 );
@@ -60,11 +63,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if bind_set && !headless { return Err("--bind and --port require --headless".into()); }
+    if bind_set && !headless { return Err("--bind, --port and --allow-host require --headless".into()); }
     if headless && dump { return Err("--headless and --dump are mutually exclusive".into()); }
     if headless {
         #[cfg(feature = "web")]
-        return web::run(sys_root, IdDb::load_system(), demo, std::net::SocketAddr::new(bind, port));
+        return web::run(sys_root, IdDb::load_system(), demo, std::net::SocketAddr::new(bind, port), allowed_hosts);
         #[cfg(not(feature = "web"))]
         return Err("web mode was not compiled; rebuild with --features web".into());
     }
