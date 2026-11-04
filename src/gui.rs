@@ -2,21 +2,20 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use eframe::egui::{self, Color32, RichText, Stroke};
 
 use crate::ids::IdDb;
 use crate::issues::{Severity, Watcher};
+use crate::engine::{Engine, TICK};
 use crate::klog::KernelLog;
 use crate::names::Names;
 use crate::sysfs::{self, Controller, ControllerKind, Device, Topology};
 use crate::rates::{fmt_rate, usable_bytes_per_sec, Rates, Series, HISTORY_SECS};
 use crate::traffic::{self, Monitor, State};
 
-const RESCAN_EVERY: Duration = Duration::from_secs(2);
 const SAMPLE_EVERY: Duration = Duration::from_secs(1);
-const TICK: Duration = Duration::from_millis(200);
 const SETUP_SCRIPT: &str = include_str!("../setup-usbmon.sh");
 
 const GREEN: Color32 = Color32::from_rgb(60, 170, 90);
@@ -33,52 +32,6 @@ pub fn run(sys_root: PathBuf, ids: IdDb, demo: bool) -> eframe::Result {
     eframe::run_native("USB Bus Monitor", options, Box::new(move |cc| Ok(Box::new(App::new(sys_root, ids, demo, cc.egui_ctx.clone())))))
 }
 
-/// Scanning, sampling and issue checks. These run on their own thread, so
-/// monitoring and the history carry on while the window is minimized or the
-/// screen is locked and nothing is being drawn.
-struct Engine {
-    sys_root: PathBuf,
-    ids: IdDb,
-    topo: Topology,
-    error: Option<String>,
-    last_scan: Instant,
-    last_sample: Instant,
-    monitor: Monitor,
-    rates: Rates,
-    watcher: Watcher,
-    klog: KernelLog,
-    /// Bumped on every change, so the window only copies new data.
-    generation: u64,
-}
-
-impl Engine {
-    fn rescan(&mut self) {
-        match sysfs::scan(&self.sys_root, &self.ids) {
-            Ok(t) => {
-                self.watcher.on_scan(&t);
-                self.topo = t;
-                self.error = None;
-            }
-            Err(e) => self.error = Some(format!("Could not read {}: {e}", self.sys_root.join("bus/usb/devices").display())),
-        }
-        self.last_scan = Instant::now();
-        self.generation += 1;
-    }
-
-    fn tick(&mut self) {
-        if self.last_scan.elapsed() >= RESCAN_EVERY {
-            self.rescan();
-        }
-        if self.last_sample.elapsed() >= SAMPLE_EVERY {
-            let live = self.monitor.state() == State::Running;
-            self.rates.sample(&self.topo, self.monitor.snapshot());
-            self.watcher.on_kernel_lines(self.klog.drain(), &self.topo);
-            self.watcher.on_sample(&self.topo, &self.rates, &self.rates.latest, live);
-            self.last_sample = Instant::now();
-            self.generation += 1;
-        }
-    }
-}
 
 struct App {
     engine: Arc<Mutex<Engine>>,
@@ -100,23 +53,9 @@ struct App {
 
 impl App {
     fn new(sys_root: PathBuf, ids: IdDb, demo: bool, ctx: egui::Context) -> Self {
-        let topo = sysfs::scan(&sys_root, &ids).unwrap_or_default();
-        let monitor = if demo { demo_monitor(&topo) } else { Monitor::start() };
-        let klog = if demo { KernelLog::default() } else { KernelLog::start() };
-        let mut engine = Engine {
-            sys_root,
-            ids,
-            topo,
-            error: None,
-            last_scan: Instant::now(),
-            last_sample: Instant::now(),
-            monitor: monitor.clone(),
-            rates: Rates::default(),
-            watcher: Watcher::new(),
-            klog: klog.clone(),
-            generation: 0,
-        };
-        engine.rescan();
+        let engine = Engine::new(sys_root, ids, demo);
+        let monitor = engine.monitor.clone();
+        let klog = engine.klog.clone();
         let engine = Arc::new(Mutex::new(engine));
         let bg = engine.clone();
         std::thread::spawn(move || loop {
@@ -189,25 +128,6 @@ impl App {
     }
 }
 
-/// Plausible SDR-ish rates for every device, for screenshots.
-fn demo_monitor(topo: &Topology) -> Monitor {
-    let mut all = topo.all_devices();
-    all.sort_by_key(|d| d.sdr.is_none());
-    let devs = all
-        .iter()
-        .filter(|d| !d.sysname.starts_with("usb"))
-        .map(|d| {
-            let rate = match d.sdr {
-                Some("RTL-SDR") => 4_800_000,
-                Some("Airspy") => 20_000_000,
-                Some(_) => 40_000_000,
-                None => 2_000,
-            };
-            (d.busnum as u16, d.devnum as u8, rate)
-        })
-        .collect();
-    Monitor::demo(devs)
-}
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

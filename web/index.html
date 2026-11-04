@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>USB Bus Monitor</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">HARDWARE / LIVE OBSERVABILITY</p>
+        <h1>USB Bus Monitor <span id="demo"></span></h1>
+        <p id="board">Connecting to monitor…</p>
+      </div>
+      <div id="connection" role="status">Connecting</div>
+    </header>
+    <main>
+      <section id="summary" class="metrics" aria-label="Overview"></section>
+      <div id="notice" role="status"></div>
+      <div class="workspace">
+        <section class="panel">
+          <div class="panel-title">
+            <h2>USB topology</h2>
+            <span>Updates every 2s</span>
+          </div>
+          <div id="tree"></div>
+        </section>
+        <section class="panel details">
+          <div class="panel-title">
+            <h2>Details & traffic</h2>
+            <span>60-second history</span>
+          </div>
+          <div id="details">
+            <p class="empty">
+              Select a controller or device to inspect its traffic and
+              connection.
+            </p>
+          </div>
+        </section>
+      </div>
+      <div class="workspace bottom">
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Right now</h2>
+            <span id="issue-count"></span>
+          </div>
+          <div id="issues"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Event history</h2>
+            <span id="event-count"></span>
+          </div>
+          <label class="search"
+            >Filter history
+            <input
+              id="filter"
+              type="search"
+              placeholder="Device, error or event…"
+          /></label>
+          <div id="events" aria-live="off"></div>
+          <p id="log-path" class="footnote"></p>
+        </section>
+      </div>
+      <footer>
+        Read-only monitor · Sampling continues when this page is closed ·
+        <span id="updated"></span>
+      </footer>
+    </main>
+  </body>
+</html>

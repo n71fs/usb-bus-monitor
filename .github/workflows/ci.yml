@@ -1,0 +1,23 @@
+name: Linux build and tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install desktop build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libudev-dev pkg-config
+      - name: Install stable Rust
+        run: rustup update stable && rustup default stable
+      - name: Test headless without desktop dependencies
+        run: cargo test --locked --no-default-features --features web
+      - name: Test existing desktop build
+        run: cargo test --locked
+      - name: Test combined desktop and web build
+        run: cargo test --locked --all-features
+      - name: Build optimized headless binary
+        run: cargo build --locked --release --no-default-features --features web
