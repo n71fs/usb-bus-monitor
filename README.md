@@ -159,3 +159,14 @@ Keep it raised after every reboot:
 ```
 echo 'w /sys/module/usbcore/parameters/usbfs_memory_mb - - - - 1000' | sudo tee /etc/tmpfiles.d/usbfs-memory.conf
 ```
+
+## Headless Ubuntu Server / web GUI
+
+Build with `cargo build --locked --release --no-default-features --features web`,
+then run `./target/release/usb-monitor --headless`. The responsive, read-only web
+GUI listens on **127.0.0.1:8080** by default and reuses the desktop monitoring
+engine. Use `--bind IP --port PORT` for explicit LAN/Tailscale access.
+See [headless deployment](docs/headless.md) for permissions, systemd, SSH tunnels,
+Tailscale Serve, and authentication/reverse proxy options. No desktop or display
+server is required. There is no built-in authentication; do not expose it publicly.
+The normal build and desktop startup remain unchanged.

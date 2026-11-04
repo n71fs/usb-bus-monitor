@@ -1,0 +1,25 @@
+[Unit]
+Description=USB Bus Monitor headless web interface
+After=network.target
+
+[Service]
+Type=simple
+User=usb-monitor
+Group=usb-monitor
+SupplementaryGroups=plugdev systemd-journal
+ExecStart=/usr/local/bin/usb-monitor --headless
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+KillMode=control-group
+StateDirectory=usb-monitor
+Environment=XDG_STATE_HOME=/var/lib/usb-monitor
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# Do not enable PrivateDevices: the monitor must read /dev/usbmon0.
+
+[Install]
+WantedBy=multi-user.target

@@ -7,8 +7,8 @@
 //! (the first account on a desktop install is one).
 
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::thread;
 
 /// One log message worth showing.
@@ -31,6 +31,8 @@ impl LogLine {
 pub struct KernelLog {
     lines: Arc<Mutex<Vec<LogLine>>>,
     pub running: Arc<Mutex<bool>>,
+    child: Arc<Mutex<Option<Child>>>,
+    stopping: Arc<AtomicBool>,
 }
 
 impl KernelLog {
@@ -44,8 +46,18 @@ impl KernelLog {
                 .stderr(Stdio::null())
                 .spawn();
             let Ok(mut child) = child else { return };
+            let out = child.stdout.take();
+            {
+                let mut handle = bg.child.lock().unwrap();
+                if bg.stopping.load(Ordering::SeqCst) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                *handle = Some(child);
+            }
             *bg.running.lock().unwrap() = true;
-            if let Some(out) = child.stdout.take() {
+            if let Some(out) = out {
                 for line in BufReader::new(out).lines().map_while(Result::ok) {
                     if let Some(l) = parse(&line).filter(is_interesting) {
                         bg.lines.lock().unwrap().push(l);
@@ -53,8 +65,19 @@ impl KernelLog {
                 }
             }
             *bg.running.lock().unwrap() = false;
+            if let Some(mut child) = bg.child.lock().unwrap().take() { let _ = child.wait(); }
         });
         k
+    }
+
+    /// Stops and reaps the journal follower when a headless server shuts down.
+    pub fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        *self.running.lock().unwrap() = false;
     }
 
     /// Takes the lines collected since the last call.

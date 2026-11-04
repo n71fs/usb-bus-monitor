@@ -6,6 +6,18 @@ description = "Desktop monitor for USB buses, ports and SDR traffic on Linux"
 license-file = "LICENSE"
 repository = "https://github.com/photounit/usb-bus-monitor"
 
+[features]
+default = ["desktop"]
+desktop = ["dep:eframe"]
+web = ["dep:axum", "dep:tokio", "dep:serde_json"]
+
 [dependencies]
-eframe = "0.37"
+eframe = { version = "0.37", optional = true }
 libc = "0.2.191"
+
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "time"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
